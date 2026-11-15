@@ -31,6 +31,75 @@ locals {
     for asset in local.runner_release.assets : asset.browser_download_url
     if can(regex("^actions-runner-win-x64-.*\\.zip$", asset.name))
   ][0]
+
+  create_user_profile = <<-EOT
+      # Create a Windows user profile using the native CreateProfile API via P/Invoke.
+      function Create-LocalUserProfile {
+          [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+          param(
+              [Parameter(Mandatory, ValueFromPipeline, ValueFromPipelineByPropertyName)]
+              [Alias('Name')]
+              [ValidateNotNullOrEmpty()]
+              [string]$UserName
+          )
+
+          begin {
+              if (-not ('UserProfileNative' -as [type])) {
+                  Add-Type @'
+      using System;
+      using System.Runtime.InteropServices;
+      using System.Text;
+
+      public static class UserProfileNative {
+          [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
+          public static extern int CreateProfile(
+              string sid,
+              string username,
+              StringBuilder profilePath,
+              uint profilePathLength
+          );
+      }
+      '@
+              }
+          }
+
+          process {
+              $user = Get-LocalUser -Name $UserName -ErrorAction Stop
+              $sid = $user.SID.Value
+
+              if ($PSCmdlet.ShouldProcess($UserName, 'Create Windows user profile')) {
+                  $path = [System.Text.StringBuilder]::new(260)
+
+                  $result = [UserProfileNative]::CreateProfile(
+                      $sid,
+                      $UserName,
+                      $path,
+                      [uint32]$path.Capacity
+                  )
+
+                  if ($result -ne 0) {
+                      $exception = [System.ComponentModel.Win32Exception]::new($result)
+                      $errorRecord = [System.Management.Automation.ErrorRecord]::new(
+                          $exception,
+                          'CreateUserProfileFailed',
+                          [System.Management.Automation.ErrorCategory]::InvalidOperation,
+                          $UserName
+                      )
+
+                      $PSCmdlet.WriteError($errorRecord)
+                      return
+                  }
+
+                  [PSCustomObject]@{
+                      UserName    = $UserName
+                      SID         = $sid
+                      ProfilePath = $path.ToString()
+                      Created     = $true
+                  }
+              }
+          }
+      }
+    EOT
 }
 
 resource "random_password" "runner_password" {
@@ -193,8 +262,8 @@ resource "azurerm_virtual_machine_run_command" "create_runner_user" {
   location           = azurerm_resource_group.rg.location
   virtual_machine_id = azurerm_windows_virtual_machine.vm.id
   depends_on         = [azurerm_virtual_machine_run_command.prepare_podman_hyperv]
-  run_as_user        = azurerm_windows_virtual_machine.vm.admin_username
-  run_as_password    = azurerm_windows_virtual_machine.vm.admin_password
+  # run_as_user        = azurerm_windows_virtual_machine.vm.admin_username
+  # run_as_password    = azurerm_windows_virtual_machine.vm.admin_password
 
   parameter {
     name  = "RunnerUser"
@@ -224,6 +293,8 @@ resource "azurerm_virtual_machine_run_command" "create_runner_user" {
           [string]$InstallRoot
       )
 
+      ${local.create_user_profile}
+
       $ErrorActionPreference = 'Stop'
 
       $securePassword = ConvertTo-SecureString `
@@ -246,7 +317,7 @@ resource "azurerm_virtual_machine_run_command" "create_runner_user" {
               -Name $RunnerUser `
               -Password $securePassword `
               -PasswordNeverExpires $true `
-              -UserMayNotChangePassword $true
+              -UserMayChangePassword $false
       }
 
       $accountName = $env:COMPUTERNAME + [char]92 + $RunnerUser
@@ -278,23 +349,12 @@ resource "azurerm_virtual_machine_run_command" "create_runner_user" {
       $acl.SetAccessRule($rule)
       Set-Acl -Path $InstallRoot -AclObject $acl
 
-      # Let Windows create and register the real user profile. Pre-creating
-      # C:\Users\$RunnerUser can make Windows use a suffixed profile on first
-      # logon, which would hide the Podman machine state from the runner.
-      $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-      $startInfo.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
-      $startInfo.Arguments = '/c exit 0'
-      $startInfo.UserName = $RunnerUser
-      $startInfo.Domain = $env:COMPUTERNAME
-      $startInfo.Password = $securePassword
-      $startInfo.UseShellExecute = $false
-      $startInfo.LoadUserProfile = $true
-      $startInfo.CreateNoWindow = $true
 
-      $profileProcess = [System.Diagnostics.Process]::Start($startInfo)
-      $profileProcess.WaitForExit()
+      $profileDirectory = (Create-LocalUserProfile -Name $RunnerUser).ProfilePath
 
-      $profileDirectory = Join-Path $env:SystemDrive "Users\$RunnerUser"
+      # When I call the Create-LocalUserProfile cmdlet, it creates the profile directory but the administrators group is the owner. 
+      # The subfolders are correctly set up.
+      Set-Acl -Path $profileDirectory -AclObject $acl
 
       if (-not (Test-Path -Path $profileDirectory)) {
           throw "Windows did not create the profile directory $profileDirectory."
@@ -614,4 +674,10 @@ resource "azurerm_virtual_machine_run_command" "verify" {
   source {
     script = file("${path.module}/Setup-WindowsPodmanActionRunner.ps1")
   }
+}
+
+output "runner_password" {
+  description = "Password used to run the GitHub Actions runner."
+  value       = random_password.runner_password.result
+  sensitive   = true
 }

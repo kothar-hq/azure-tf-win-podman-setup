@@ -103,14 +103,15 @@ resource "azurerm_network_interface_security_group_association" "nic" {
 # Virtual Machine
 # -------------------------------
 resource "azurerm_windows_virtual_machine" "vm" {
-  name                  = var.vm_name
-  resource_group_name   = azurerm_resource_group.rg.name
-  location              = azurerm_resource_group.rg.location
-  size                  = var.vm_size
-  admin_username        = var.vm_admin_username
-  admin_password        = random_password.vm_admin_password.result
-  network_interface_ids = [azurerm_network_interface.nic.id]
-  provision_vm_agent    = true
+  name                              = var.vm_name
+  resource_group_name               = azurerm_resource_group.rg.name
+  location                          = azurerm_resource_group.rg.location
+  size                              = var.vm_size
+  admin_username                    = var.vm_admin_username
+  admin_password                    = random_password.vm_admin_password.result
+  network_interface_ids             = [azurerm_network_interface.nic.id]
+  provision_vm_agent                = true
+  vm_agent_platform_updates_enabled = true
 
   boot_diagnostics {}
 

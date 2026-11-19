@@ -34,7 +34,7 @@ locals {
 
   create_user_profile = <<-EOT
       # Create a Windows user profile using the native CreateProfile API via P/Invoke.
-      function Create-LocalUserProfile {
+      function New-LocalUserProfile {
           [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
           param(
               [Parameter(Mandatory, ValueFromPipeline, ValueFromPipelineByPropertyName)]
@@ -100,6 +100,17 @@ locals {
           }
       }
     EOT
+
+    add_user_to_hyperv_admins = <<-EOT
+      # The Hyper-V Administrators group has a well-known SID.
+      $hyperVGroupSid = 'S-1-5-32-578'
+      $isHyperVAdmin = Get-LocalGroupMember -SID $hyperVGroupSid |
+          Where-Object { $_.Name -eq $accountName }
+
+      if (-not $isHyperVAdmin) {
+          Add-LocalGroupMember -SID $hyperVGroupSid -Member $accountName
+      }
+    EOT
 }
 
 resource "random_password" "runner_password" {
@@ -123,17 +134,106 @@ resource "time_sleep" "wait_for_vm_agent" {
   }
 }
 
-resource "azurerm_virtual_machine_run_command" "install_hyperv" {
-  name               = "install-hyperv"
+resource "azurerm_virtual_machine_run_command" "enable_remote_management" {
+  count = var.enable_remote_management ? 1 : 0
+
+  name               = "enable-remote-management"
   location           = azurerm_resource_group.rg.location
   virtual_machine_id = azurerm_windows_virtual_machine.vm.id
   depends_on         = [time_sleep.wait_for_vm_agent]
+
+  timeouts {
+    create = "15m"
+  }
 
   source {
     script = <<-EOT
       $ErrorActionPreference = 'Stop'
 
-      $feature = Get-WindowsFeature -Name Hyper-V
+      # OpenSSH Server provides SSH and SCP (through the SFTP subsystem).
+      $sshCapability = Get-WindowsCapability -Online |
+          Where-Object { $_.Name -like 'OpenSSH.Server*' } |
+          Select-Object -First 1
+
+      if (-not $sshCapability -or $sshCapability.State -ne 'Installed') {
+          Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0' |
+              Out-Null
+      }
+
+      $sshdConfig = Join-Path $env:ProgramData 'ssh\sshd_config'
+
+      if (-not (Test-Path -Path $sshdConfig)) {
+          throw "OpenSSH configuration not found at $sshdConfig."
+      }
+
+      $config = Get-Content -Path $sshdConfig
+
+      if ($config -match '^\s*#?\s*PasswordAuthentication\s+') {
+          $config = $config -replace '^\s*#?\s*PasswordAuthentication\s+.*$', 'PasswordAuthentication yes'
+      }
+      else {
+          $config += 'PasswordAuthentication yes'
+      }
+
+      if (-not ($config -match '^\s*Subsystem\s+sftp\s+')) {
+          $config += 'Subsystem sftp sftp-server.exe'
+      }
+
+      Set-Content -Path $sshdConfig -Value $config -Encoding ascii
+
+      Set-Service -Name sshd -StartupType Automatic
+      Start-Service -Name sshd
+      Restart-Service -Name sshd
+
+      foreach ($rule in @(
+          @{ Name = 'Allow-SSH-From-Azure'; Port = 22 },
+          @{ Name = 'Allow-WinRM-HTTP-From-Azure'; Port = 5985 }
+      )) {
+          if (-not (Get-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue)) {
+              New-NetFirewallRule `
+                  -Name $rule.Name `
+                  -DisplayName $rule.Name `
+                  -Enabled True `
+                  -Direction Inbound `
+                  -Protocol TCP `
+                  -Action Allow `
+                  -LocalPort $rule.Port `
+                  -Profile Any |
+                  Out-Null
+          }
+      }
+
+      # Configure PowerShell Remoting over WinRM HTTP (TCP 5985).
+      Enable-PSRemoting -SkipNetworkProfileCheck -Force
+      Set-Service -Name WinRM -StartupType Automatic
+      Start-Service -Name WinRM
+
+      # Workgroup VMs need this to allow local administrators to authenticate
+      # remotely without UAC filtering their token.
+      $systemPolicy = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+      New-ItemProperty `
+          -Path $systemPolicy `
+          -Name 'LocalAccountTokenFilterPolicy' `
+          -PropertyType DWord `
+          -Value 1 `
+          -Force |
+          Out-Null
+    EOT
+  }
+}
+
+resource "azurerm_virtual_machine_run_command" "install_hyperv" {
+  name               = "install-hyperv"
+  location           = azurerm_resource_group.rg.location
+  virtual_machine_id = azurerm_windows_virtual_machine.vm.id
+  depends_on = [
+    time_sleep.wait_for_vm_agent,
+    azurerm_virtual_machine_run_command.enable_remote_management,
+  ]
+
+  source {
+    script = <<-EOT
+      $ErrorActionPreference = 'Stop'
 
       $result = Install-WindowsFeature -Name Hyper-V, Hyper-V-PowerShell -Restart
 
@@ -153,6 +253,49 @@ resource "time_sleep" "wait_for_reboot" {
   }
 }
 
+/*
+resource "terraform_data" "wait_for_reboot" {
+  depends_on = [azurerm_virtual_machine_run_command.install_hyperv]
+
+  triggers_replace = [
+    azurerm_virtual_machine_run_command.install_hyperv.id,
+  ]
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+
+    environment = {
+      TARGET_IP = azurerm_public_ip.pip.ip_address
+    }
+
+    command = <<-EOT
+      set -euo pipefail
+
+      if ! command -v nc >/dev/null 2>&1; then
+          echo 'nc (netcat) is required to verify the VM reboot.' >&2
+          exit 1
+      fi
+
+      echo "Waiting 60 seconds for the VM to reboot..."
+      sleep 60
+
+      for attempt in $(seq 1 30); do
+          if nc -z -w 5 "$TARGET_IP" 3389; then
+              echo "RDP on $TARGET_IP:3389 is reachable after $attempt attempt(s)."
+              exit 0
+          fi
+
+          echo "Attempt $attempt/30: RDP not reachable yet; retrying in 15 seconds."
+          sleep 15
+      done
+
+      echo "Timed out waiting for RDP on $TARGET_IP:3389." >&2
+      exit 1
+    EOT
+  }
+}
+// */
+
 # -------------------------------
 # VM Run Command - Install Podman
 # -------------------------------
@@ -160,8 +303,9 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
   name               = "install-podman"
   location           = azurerm_resource_group.rg.location
   virtual_machine_id = azurerm_windows_virtual_machine.vm.id
+  //depends_on         = [terraform_data.wait_for_reboot]
   depends_on         = [time_sleep.wait_for_reboot]
-
+  
   timeouts {
     create = "30m"
   }
@@ -171,11 +315,18 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
     value = local.podman_msi_url
   }
 
+  parameter {
+    name  = "AccountName"
+    value = azurerm_windows_virtual_machine.vm.admin_username
+  }
+
   source {
     script = <<-EOT
       param(
           [Parameter(Mandatory)]
-          [string]$PodmanMsiUrl
+          [string]$PodmanMsiUrl,
+          [Parameter(Mandatory)]
+          [string]$AccountName
       )
 
       $ErrorActionPreference = 'Stop'
@@ -218,6 +369,7 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
               'Machine'
           )
       }
+      ${local.add_user_to_hyperv_admins}
     EOT
   }
 }
@@ -245,7 +397,7 @@ resource "azurerm_virtual_machine_run_command" "prepare_podman_hyperv" {
 
       # Pre-create the HKLM VSock entries so the runner account can create
       # and manage Hyper-V machines without an elevated token.
-      & $podman system hyperv-prep
+      & $podman system hyperv-prep || { "ignore failure"; $global:LASTEXITCODE = 0 }
 
       if ($LASTEXITCODE -ne 0) {
           throw 'Podman Hyper-V preparation failed.'
@@ -322,14 +474,7 @@ resource "azurerm_virtual_machine_run_command" "create_runner_user" {
 
       $accountName = $env:COMPUTERNAME + [char]92 + $RunnerUser
 
-      # The Hyper-V Administrators group has a well-known SID.
-      $hyperVGroupSid = 'S-1-5-32-578'
-      $isHyperVAdmin = Get-LocalGroupMember -SID $hyperVGroupSid |
-          Where-Object { $_.Name -eq $accountName }
-
-      if (-not $isHyperVAdmin) {
-          Add-LocalGroupMember -SID $hyperVGroupSid -Member $accountName
-      }
+      ${local.add_user_to_hyperv_admins}
 
       # Managed Run Command run_as_user relies on Secondary Logon.
       Set-Service -Name seclogon -StartupType Automatic
@@ -350,15 +495,15 @@ resource "azurerm_virtual_machine_run_command" "create_runner_user" {
       Set-Acl -Path $InstallRoot -AclObject $acl
 
 
-      $profileDirectory = (Create-LocalUserProfile -Name $RunnerUser).ProfilePath
+      $profileDirectory = (New-LocalUserProfile -Name $RunnerUser).ProfilePath
 
-      # When I call the Create-LocalUserProfile cmdlet, it creates the profile directory but the administrators group is the owner. 
-      # The subfolders are correctly set up.
-      Set-Acl -Path $profileDirectory -AclObject $acl
-
+      # New-LocalUserProfile creates the profile directory, but the
+      # administrators group owns it. The subfolders are created correctly.
       if (-not (Test-Path -Path $profileDirectory)) {
           throw "Windows did not create the profile directory $profileDirectory."
       }
+
+      Set-Acl -Path $profileDirectory -AclObject $acl
     EOT
   }
 }

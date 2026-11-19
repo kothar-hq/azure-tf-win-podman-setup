@@ -11,6 +11,19 @@ data "http" "my_ip" {
 
 locals {
   my_ip_cidr = "${trimspace(data.http.my_ip.response_body)}/32"
+
+  remote_management_rules = var.enable_remote_management ? {
+    ssh = {
+      name     = "Allow-SSH-From-MyIP"
+      priority = 110
+      port     = "22"
+    }
+    winrm = {
+      name     = "Allow-WinRM-From-MyIP"
+      priority = 120
+      port     = "5985"
+    }
+  } : {}
 }
 
 # -------------------------------
@@ -51,7 +64,7 @@ resource "azurerm_subnet" "subnet" {
 }
 
 # -------------------------------
-# Network Security Group - RDP from current public IP only
+# Network Security Group - management access from current public IP only
 # -------------------------------
 resource "azurerm_network_security_group" "rdp" {
   name                = "tf-demo-rdp-nsg"
@@ -68,6 +81,22 @@ resource "azurerm_network_security_group" "rdp" {
     destination_port_range     = "3389"
     source_address_prefix      = local.my_ip_cidr
     destination_address_prefix = "*"
+  }
+
+  dynamic "security_rule" {
+    for_each = local.remote_management_rules
+
+    content {
+      name                       = security_rule.value.name
+      priority                   = security_rule.value.priority
+      direction                  = "Inbound"
+      access                     = "Allow"
+      protocol                   = "Tcp"
+      source_port_range          = "*"
+      destination_port_range     = security_rule.value.port
+      source_address_prefix      = local.my_ip_cidr
+      destination_address_prefix = "*"
+    }
   }
 }
 
@@ -140,4 +169,14 @@ output "vm_admin_password" {
 output "vm_public_ip" {
   description = "Public IP address assigned to the Windows VM."
   value       = azurerm_public_ip.pip.ip_address
+}
+
+output "resource_group_name" {
+  description = "Resource group containing the Windows VM."
+  value       = azurerm_resource_group.rg.name
+}
+
+output "vm_name" {
+  description = "Name of the Windows VM."
+  value       = azurerm_windows_virtual_machine.vm.name
 }

@@ -26,7 +26,7 @@ tf-validate:
 	terraform validate
 
 shellcheck:
-	shellcheck terraform-with-secrets.sh
+	shellcheck terraform-with-secrets.sh scripts/hyperv-prep-harness.sh
 
 ps-lint:
 	$(PWSH)

@@ -78,3 +78,12 @@ make apply CONFIRM=apply
 - Azure CLI authenticated with access to the target subscription.
 - GitHub CLI authenticated with `repo` scope, or `TF_VAR_github_token` set.
 - `nc` (netcat) available locally for the post-reboot TCP probe.
+
+## hyperv-prep harness (podman#30266)
+
+`scripts/hyperv-prep-harness.sh <bin-dir> [suffix ...]` copies each
+`podman-<suffix>.exe` to `C:\podman-test` over scp (ephemeral key in
+`.harness/`, gitignored) and runs `podman system hyperv-prep` through a
+`run_as_user` run command as a fresh, never-logged-on local administrator.
+Results land in `.harness/results/`. It needs a deployed VM with
+`enable_remote_management = true` and never applies.

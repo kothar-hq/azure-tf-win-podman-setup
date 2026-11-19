@@ -101,11 +101,16 @@ locals {
       }
     EOT
 
-    add_user_to_hyperv_admins = <<-EOT
+  add_user_to_hyperv_admins = <<-EOT
       # The Hyper-V Administrators group has a well-known SID.
+      # Compare SIDs: Get-LocalGroupMember reports names as COMPUTER\user, so a
+      # name comparison misses bare user names and re-adding throws.
       $hyperVGroupSid = 'S-1-5-32-578'
+      $accountSid = ([Security.Principal.NTAccount]$accountName).Translate(
+          [Security.Principal.SecurityIdentifier]
+      ).Value
       $isHyperVAdmin = Get-LocalGroupMember -SID $hyperVGroupSid |
-          Where-Object { $_.Name -eq $accountName }
+          Where-Object { $_.SID.Value -eq $accountSid }
 
       if (-not $isHyperVAdmin) {
           Add-LocalGroupMember -SID $hyperVGroupSid -Member $accountName
@@ -244,16 +249,6 @@ resource "azurerm_virtual_machine_run_command" "install_hyperv" {
   }
 }
 
-resource "time_sleep" "wait_for_reboot" {
-  depends_on      = [azurerm_virtual_machine_run_command.install_hyperv]
-  create_duration = "6m"
-
-  triggers = {
-    vm_id = azurerm_windows_virtual_machine.vm.id
-  }
-}
-
-/*
 resource "terraform_data" "wait_for_reboot" {
   depends_on = [azurerm_virtual_machine_run_command.install_hyperv]
 
@@ -294,7 +289,6 @@ resource "terraform_data" "wait_for_reboot" {
     EOT
   }
 }
-// */
 
 # -------------------------------
 # VM Run Command - Install Podman
@@ -303,9 +297,8 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
   name               = "install-podman"
   location           = azurerm_resource_group.rg.location
   virtual_machine_id = azurerm_windows_virtual_machine.vm.id
-  //depends_on         = [terraform_data.wait_for_reboot]
-  depends_on         = [time_sleep.wait_for_reboot]
-  
+  depends_on         = [terraform_data.wait_for_reboot]
+
   timeouts {
     create = "30m"
   }
@@ -369,7 +362,19 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
               'Machine'
           )
       }
+
+      # Workaround for podman-container-tools/podman#30266: add the admin to
+      # Hyper-V Administrators here, as SYSTEM. The run_as_user logon in
+      # prepare-podman-hyperv then carries the group in its token, so
+      # `podman system hyperv-prep` skips the user.Current() call that fails
+      # when the user's profile is not loaded.
+      $accountName = $AccountName
       ${local.add_user_to_hyperv_admins}
+
+      # prepare-podman-hyperv is the first run_as_user command, and run-as
+      # needs Secondary Logon.
+      Set-Service -Name seclogon -StartupType Automatic
+      Start-Service -Name seclogon
     EOT
   }
 }
@@ -396,11 +401,18 @@ resource "azurerm_virtual_machine_run_command" "prepare_podman_hyperv" {
       }
 
       # Pre-create the HKLM VSock entries so the runner account can create
-      # and manage Hyper-V machines without an elevated token.
-      & $podman system hyperv-prep || { "ignore failure"; $global:LASTEXITCODE = 0 }
+      # and manage Hyper-V machines without an elevated token. install-podman
+      # already added this account to Hyper-V Administrators (see #30266).
+      # Run-as output is not always returned to Azure, so keep a log too.
+      $log = Join-Path $env:ProgramData 'podman-hyperv-prep.log'
+      $ErrorActionPreference = 'Continue'
+      & $podman system hyperv-prep 2>&1 | Tee-Object -FilePath $log
+      $prepExit = $LASTEXITCODE
+      & $podman system hyperv-prep --status 2>&1 | Tee-Object -FilePath $log -Append
+      $ErrorActionPreference = 'Stop'
 
-      if ($LASTEXITCODE -ne 0) {
-          throw 'Podman Hyper-V preparation failed.'
+      if ($prepExit -ne 0) {
+          throw "podman system hyperv-prep failed with exit code $prepExit. See $log"
       }
     EOT
   }

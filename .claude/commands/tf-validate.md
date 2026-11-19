@@ -1,0 +1,1 @@
+../../.opencode/commands/tf-validate.md

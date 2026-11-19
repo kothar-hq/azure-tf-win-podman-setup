@@ -1,5 +1,5 @@
 ---
-name: PowerShell Run Commands
+name: powershell-run-commands
 description: Write, review, or debug PowerShell used in Azure VM run commands and the runner install scripts. Use for post-install.tf scripts, parameter passing, run_as_user, reboot handling, or PSScriptAnalyzer failures.
 ---
 

@@ -19,6 +19,8 @@ Podman machine and a self-hosted GitHub Actions runner for
 | `.opencode/agents/` | `infra-reviewer` (read-only review) and `apply-debugger` (read-only triage). |
 | `.opencode/commands/` | `/tf-validate`, `/tf-plan`, `/tf-status`, `/tf-run-commands`, `/tf-password`. |
 | `.opencode/plugins/infra-tools/index.ts` | OpenCode tools: `infra_validate`, `infra_plan`, `infra_status`, `infra_run_commands`. |
+| `.claude/` | Claude Code equivalents: skills and commands are symlinks into `.opencode/`; `agents/` mirrors the OpenCode agents with Claude frontmatter; `hooks/guard-readonly-shell.sh` enforces `apply-debugger`'s read-only shell; `settings.json` asks before apply/destroy/password. |
+| `CLAUDE.md` | Imports this file for Claude Code. |
 
 ## Safety rules
 

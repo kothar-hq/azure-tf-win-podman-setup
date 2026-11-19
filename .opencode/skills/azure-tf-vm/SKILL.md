@@ -1,5 +1,5 @@
 ---
-name: Azure Terraform VM
+name: azure-tf-vm
 description: Work on the Terraform Azure Windows VM that hosts the Hyper-V Podman machine and GitHub Actions runner. Use for plan/apply, remote access, run-command debugging, or changes to vm.tf and post-install.tf.
 ---
 

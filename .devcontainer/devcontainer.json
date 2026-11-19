@@ -17,6 +17,16 @@
 			"tflint": "latest",
 			"terragrunt": "latest",
 			"terraformDocsVersion": "latest"
+		},
+		"ghcr.io/devcontainers/features/powershell:2": {
+			"version": "lts",
+			"modules": "PSScriptAnalyzer"
+		},
+		"ghcr.io/devcontainers-extra/features/shellcheck:1": {
+			"version": "latest"
+		},
+		"ghcr.io/rocker-org/devcontainer-features/apt-packages:1": {
+			"packages": "netcat-openbsd"
 		}
 	}
 

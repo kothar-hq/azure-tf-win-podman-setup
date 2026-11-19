@@ -107,7 +107,10 @@ resource "azurerm_public_ip" "pip" {
   name                = "tf-demo-pip"
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
-  allocation_method   = "Dynamic"
+  # Basic SKU public IPs are retired. Static allocation also means the address
+  # is known before the VM boots, which the post-reboot TCP probe relies on.
+  sku               = "Standard"
+  allocation_method = "Static"
 }
 
 resource "azurerm_network_interface" "nic" {

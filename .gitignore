@@ -41,3 +41,6 @@ terraform.rc
 
 # we want to ignore podman
 *.msi 
+
+# hyperv-prep harness keys and results
+.harness/

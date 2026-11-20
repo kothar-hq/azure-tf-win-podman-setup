@@ -16,7 +16,8 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 ps_dir="$repo/scripts/hyperv-prep-harness"
-state_dir="${HARNESS_STATE_DIR:-$repo/.harness}"
+# Keep the key off the workspace mount: it may force 0777, which ssh rejects.
+state_dir="${HARNESS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/hyperv-prep-harness}"
 tf="$repo/terraform-with-secrets.sh"
 
 bin_dir=${1:?usage: $0 <bin-dir> [suffix ...]}
@@ -45,9 +46,13 @@ ssh_opts=(-i "$key" -o BatchMode=yes -o StrictHostKeyChecking=accept-new
 
 # run_cmd <name> <script-file> [--run-as-user U --run-as-password P] -- [k=v ...]
 # Creates/updates a managed run command, waits for it, prints its output, and
-# returns 0 only when it succeeded.
+# returns 0 only when it succeeded. A unique header line forces Azure to
+# re-execute even when the script and parameters are unchanged.
 run_cmd() {
-  local name=$1 script=$2; shift 2
+  # The VM keeps each name's last sequence number after the run command is
+  # deleted, and silently skips a re-created one (it times out as Pending),
+  # so every harness run uses fresh names.
+  local name="$1-$run_id" script=$2; shift 2
   local extra=() params=() protected=()
   while [ "$#" -gt 0 ] && [ "$1" != -- ]; do extra+=("$1"); shift; done
   [ "${1:-}" = -- ] && shift
@@ -58,17 +63,44 @@ run_cmd() {
     esac
   done
   local args=(--resource-group "$rg" --vm-name "$vm" --name "$name"
-    --script "@$script" --timeout-in-seconds 600 --only-show-errors -o none)
+    --script "$(printf "# harness run %s\n" "$(date +%s%N)"; cat "$script")" --timeout-in-seconds 600 --only-show-errors -o none)
   [ "${#params[@]}" -gt 0 ] && args+=(--parameters "${params[@]}")
   [ "${#protected[@]}" -gt 0 ] && args+=(--protected-parameters "${protected[@]}")
-  az vm run-command create "${args[@]}" "${extra[@]}" >/dev/null 2>"$state_dir/results/$name.az.err" || true
+  local err="$state_dir/results/$name.az.err"
+  # A failing script also makes `create` exit non-zero, so only treat
+  # non-extension errors (quota, auth, bad request) as harness failures.
+  if ! az vm run-command create "${args[@]}" "${extra[@]}" >/dev/null 2>"$err" &&
+    ! grep -q VMExtensionProvisioningError "$err"; then
+    echo "az vm run-command create $name failed:" >&2
+    cat "$err" >&2
+    exit 1
+  fi
   az vm run-command show --resource-group "$rg" --vm-name "$vm" --name "$name" --instance-view \
     --query '{state:instanceView.executionState,exit:instanceView.exitCode,output:instanceView.output,error:instanceView.error}' \
     -o json >"$state_dir/results/$name.json"
+  # Azure allows 25 managed run commands per VM; the results are saved above.
+  az vm run-command delete --resource-group "$rg" --vm-name "$vm" --name "$name" \
+    --yes --only-show-errors >/dev/null || true
   jq -r '"[\(.state) exit=\(.exit)]", (.output // "<no output>"), (if (.error // "") != "" then "stderr: " + .error else empty end)' \
     "$state_dir/results/$name.json"
   [ "$(jq -r .state "$state_dir/results/$name.json")" = Succeeded ]
 }
+
+run_id=$(date +%y%m%d%H%M%S)
+# HARNESS_INVOKE picks the run_as_user test script: "debug" (default) logs
+# podman's output; "issue" runs the unchanged script from podman#30266.
+case "${HARNESS_INVOKE:-debug}" in
+  debug) invoke_script="$ps_dir/Invoke-HypervPrepTest.ps1" ;;
+  issue) invoke_script="$ps_dir/Invoke-IssueScript.ps1" ;;
+  *) echo "HARNESS_INVOKE must be debug or issue" >&2; exit 1 ;;
+esac
+
+echo "== removing leftover harness run commands"
+for leftover in $(az vm run-command list --resource-group "$rg" --vm-name "$vm" \
+  --query "[?starts_with(name, 'hvp-')].name" -o tsv); do
+  az vm run-command delete --resource-group "$rg" --vm-name "$vm" --name "$leftover" \
+    --yes --only-show-errors >/dev/null
+done
 
 echo "== installing harness SSH key on $vm ($ip)"
 run_cmd hvp-install-key "$ps_dir/Install-HarnessSshKey.ps1" -- "PublicKey=$(cat "$key.pub")"
@@ -91,7 +123,7 @@ for sfx in "${suffixes[@]}"; do
   run_cmd "hvp-setup-$sfx" "$ps_dir/Initialize-HypervPrepTest.ps1" -- \
     "TestUser=$user" "secret:TestPassword=$password"
 
-  if run_cmd "hvp-test-$sfx" "$ps_dir/Invoke-HypervPrepTest.ps1" \
+  if run_cmd "hvp-test-$sfx" "$invoke_script" \
     --run-as-user "$user" --run-as-password "$password" -- \
     "PodmanExe=$exe" "LogPath=$log"; then
     azure=pass
@@ -102,8 +134,8 @@ for sfx in "${suffixes[@]}"; do
   echo "-- on-VM log and state (SYSTEM)"
   run_cmd "hvp-result-$sfx" "$ps_dir/Get-HypervPrepTestResult.ps1" -- \
     "TestUser=$user" "LogPath=$log" | tee "$state_dir/results/$sfx.log"
-  state=$(grep -o 'RESULT.*' "$state_dir/results/$sfx.log" | tail -1)
-  prep=$(grep -o 'hyperv-prep-exit=[0-9-]*' "$state_dir/results/$sfx.log" | tail -1)
+  state=$(grep -o "RESULT.*" "$state_dir/results/$sfx.log" | tail -1 || true)
+  prep=$(grep -o "hyperv-prep-exit=[0-9-]*" "$state_dir/results/$sfx.log" | tail -1 || true)
   summary+=("$(printf '%-12s run-command=%-4s %-20s %s' "$sfx" "$azure" "${prep:-hyperv-prep-exit=?}" "${state#RESULT }")")
 done
 

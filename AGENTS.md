@@ -83,7 +83,7 @@ make apply CONFIRM=apply
 
 `scripts/hyperv-prep-harness.sh <bin-dir> [suffix ...]` copies each
 `podman-<suffix>.exe` to `C:\podman-test` over scp (ephemeral key in
-`.harness/`, gitignored) and runs `podman system hyperv-prep` through a
+`~/.local/state/hyperv-prep-harness/`) and runs `podman system hyperv-prep` through a
 `run_as_user` run command as a fresh, never-logged-on local administrator.
-Results land in `.harness/results/`. It needs a deployed VM with
+Results land in `results/` under that directory. It needs a deployed VM with
 `enable_remote_management = true` and never applies.

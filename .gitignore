@@ -39,4 +39,5 @@ terraform.rc
 
 # End of https://www.toptal.com/developers/gitignore/api/terraform
 
-*.msi # we want to be able to stick podman installers  here to test locally
+# Podman installers dropped here for local testing (see podman_msi_path)
+*.msi

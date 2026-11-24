@@ -562,24 +562,22 @@ resource "azurerm_virtual_machine_run_command" "configure_podman_machine" {
 
   source {
     script = <<-EOT
+      # run_as_user appends literal "2>file 1>file" arguments, so no
+      # [Parameter()] attributes here: an advanced script rejects them and
+      # exits 1 with no output. The extra arguments land in $args.
       param(
-          [Parameter(Mandatory)]
           [string]$MachineName,
-
-          [Parameter(Mandatory)]
           [string]$RunnerUser,
-
-          [Parameter(Mandatory)]
           [int]$Cpus,
-
-          [Parameter(Mandatory)]
           [int]$MemoryMB,
-
-          [Parameter(Mandatory)]
           [int]$DiskGB
       )
 
       $ErrorActionPreference = 'Stop'
+
+      if (-not $MachineName -or -not $RunnerUser -or $Cpus -le 0 -or $MemoryMB -le 0 -or $DiskGB -le 0) {
+          throw 'MachineName, RunnerUser, Cpus, MemoryMB, and DiskGB are required.'
+      }
 
       $podmanDirectory = Join-Path $env:ProgramFiles 'Podman'
       $podman = Join-Path $podmanDirectory 'podman.exe'

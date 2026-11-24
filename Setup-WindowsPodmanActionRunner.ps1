@@ -2,9 +2,11 @@
 .SYNOPSIS
     Verifies the Podman machine and GitHub Actions runner installation.
 #>
-[CmdletBinding()]
+# This script runs through a run_as_user run command. That handler appends
+# literal "2>file 1>file" arguments, so it must stay a simple script: no
+# [CmdletBinding()] or [Parameter()] attributes, or binding fails with exit 1
+# and no output. The extra arguments land in $args.
 param(
-    [Parameter(Mandatory)]
     [string]$RunnerUser,
 
     [string]$PodmanMachineName = 'podman-machine-default'
@@ -12,6 +14,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if (-not $RunnerUser) {
+    throw 'RunnerUser is required.'
+}
 
 # Run commands that use run_as_user may inherit SYSTEM's environment block.
 $userProfile = Join-Path $env:SystemDrive "Users\$RunnerUser"

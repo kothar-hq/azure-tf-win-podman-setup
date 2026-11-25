@@ -1,0 +1,66 @@
+name: Validate
+
+# Static checks only. Nothing here talks to Azure, so no cloud credentials are
+# needed and no plan or apply ever runs.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform fmt, validate, and tflint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: terraform init (no backend)
+        run: make init
+
+      - name: terraform fmt -check
+        run: make fmt-check
+
+      - name: terraform validate
+        run: make tf-validate
+
+      - uses: terraform-linters/setup-tflint@v4
+
+      - name: tflint
+        run: make tflint
+        env:
+          # tflint --init downloads rulesets from GitHub; a token avoids rate limits.
+          GITHUB_TOKEN: ${{ github.token }}
+
+  tfsec:
+    name: tfsec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aquasecurity/tfsec-action@v1.0.3
+
+  scripts:
+    name: shellcheck and PSScriptAnalyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # shellcheck and pwsh are preinstalled on ubuntu-latest.
+      - name: shellcheck
+        run: make shellcheck
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force
+
+      # Lints the .ps1 files and the PowerShell embedded in Terraform heredocs.
+      - name: PSScriptAnalyzer
+        run: make ps-lint

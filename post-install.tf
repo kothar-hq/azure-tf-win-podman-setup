@@ -1,30 +1,55 @@
 # -------------------------------
 # Post-install: run commands that configure Hyper-V, Podman, and the runner
 # -------------------------------
+locals {
+  use_local_podman_msi = var.podman_msi_path != null
+
+  podman_release_path = var.podman_version == "latest" ? "latest" : "tags/v${var.podman_version}"
+  runner_release_path = var.runner_version == "latest" ? "latest" : "tags/v${var.runner_version}"
+}
+
+# Skipped when a local MSI is installed instead of a GitHub release.
 data "http" "podman_release" {
-  url = "https://api.github.com/repos/containers/podman/releases/latest"
+  count = local.use_local_podman_msi ? 0 : 1
+  url   = "https://api.github.com/repos/containers/podman/releases/${local.podman_release_path}"
 
   request_headers = {
     Accept     = "application/vnd.github+json"
     User-Agent = "terraform-azure-podman-runner"
+  }
+
+  lifecycle {
+    postcondition {
+      condition     = self.status_code == 200
+      error_message = "Podman release ${var.podman_version} was not found on GitHub."
+    }
   }
 }
 
 data "http" "runner_release" {
-  url = "https://api.github.com/repos/actions/runner/releases/latest"
+  url = "https://api.github.com/repos/actions/runner/releases/${local.runner_release_path}"
 
   request_headers = {
     Accept     = "application/vnd.github+json"
     User-Agent = "terraform-azure-podman-runner"
   }
+
+  lifecycle {
+    postcondition {
+      condition     = self.status_code == 200
+      error_message = "GitHub Actions runner release ${var.runner_version} was not found on GitHub."
+    }
+  }
 }
 
 locals {
-  podman_release = jsondecode(data.http.podman_release.response_body)
-  podman_msi_url = [
-    for asset in local.podman_release.assets : asset.browser_download_url
+  podman_release_msi_url = local.use_local_podman_msi ? null : [
+    for asset in jsondecode(data.http.podman_release[0].response_body).assets : asset.browser_download_url
     if can(regex("windows[-_]amd64\\.msi$", asset.name))
   ][0]
+
+  # Read-only SAS URL for the uploaded MSI (see podman-msi.tf).
+  podman_msi_url = local.use_local_podman_msi ? "${azurerm_storage_blob.podman_msi[0].url}${data.azurerm_storage_account_blob_container_sas.podman_msi[0].sas}" : local.podman_release_msi_url
 
   runner_release = jsondecode(data.http.runner_release.response_body)
   runner_zip_url = [
@@ -304,9 +329,21 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
     create = "30m"
   }
 
-  parameter {
+  # Protected: for a local MSI the URL carries a SAS token.
+  protected_parameter {
     name  = "PodmanMsiUrl"
     value = local.podman_msi_url
+  }
+
+  # Local MSI only: the script checks the download against it, and a new
+  # file re-runs this command.
+  dynamic "parameter" {
+    for_each = local.use_local_podman_msi ? [filesha256(var.podman_msi_path)] : []
+
+    content {
+      name  = "PodmanMsiSha256"
+      value = parameter.value
+    }
   }
 
   parameter {
@@ -319,16 +356,25 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
       param(
           [Parameter(Mandatory)]
           [string]$PodmanMsiUrl,
+          [string]$PodmanMsiSha256,
           [Parameter(Mandatory)]
           [string]$AccountName
       )
 
       $ErrorActionPreference = 'Stop'
 
-      $installer = Join-Path $env:TEMP (Split-Path -Path $PodmanMsiUrl -Leaf)
+      # A fixed name: a SAS URL has a query string after the file name.
+      $installer = Join-Path $env:TEMP 'podman-setup.msi'
       $log = Join-Path $env:TEMP 'podman-msi.log'
 
       Invoke-WebRequest -Uri $PodmanMsiUrl -OutFile $installer -UseBasicParsing
+
+      if ($PodmanMsiSha256) {
+          $actual = (Get-FileHash -Path $installer -Algorithm SHA256).Hash
+          if ($actual -ne $PodmanMsiSha256) {
+              throw "Podman MSI SHA-256 $actual does not match the expected $PodmanMsiSha256."
+          }
+      }
 
       $process = Start-Process `
           -FilePath 'msiexec.exe' `
@@ -407,7 +453,12 @@ resource "azurerm_virtual_machine_run_command" "prepare_podman_hyperv" {
       # Run-as output is not always returned to Azure, so keep a log too.
       $log = Join-Path $env:ProgramData 'podman-hyperv-prep.log'
       $ErrorActionPreference = 'Continue'
-      & $podman system hyperv-prep 2>&1 | Tee-Object -FilePath $log
+      # --mounts 3: podman 6.3 `machine init` defaults to three volumes (home,
+      # C:\, and %APPDATA%\containers), but hyperv-prep only creates two
+      # Fileserver entries by default. With too few, a non-admin init fails with
+      # "the first time Podman initializes a Hyper-V machine, it requires admin
+      # rights".
+      & $podman system hyperv-prep --mounts 3 2>&1 | Tee-Object -FilePath $log
       $prepExit = $LASTEXITCODE
       & $podman system hyperv-prep --status 2>&1 | Tee-Object -FilePath $log -Append
       $ErrorActionPreference = 'Stop'

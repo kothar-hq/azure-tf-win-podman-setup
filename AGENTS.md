@@ -11,6 +11,7 @@ Podman machine and a self-hosted GitHub Actions runner for
 | `main.tf` | Terraform/provider configuration and all variables. |
 | `vm.tf` | Resource group, network, NSG, public IP, NIC, VM, and base outputs. |
 | `post-install.tf` | Release lookups, reboot readiness, and all Azure VM run commands. |
+| `podman-msi.tf` | Optional private storage account, blob, and read-only SAS for a local Podman MSI (`podman_msi_path`). |
 | `New-WindowsPodmanActionRunner.ps1` | Self-contained runner install/registration script invoked by a run command. |
 | `Setup-WindowsPodmanActionRunner.ps1` | Final verification script invoked by a run command. |
 | `terraform-with-secrets.sh` | Wrapper that injects `TF_VAR_github_token` from `gh auth token`. |
@@ -72,6 +73,16 @@ make apply CONFIRM=apply
 - Validation dedents `<<-EOT` bodies before PSScriptAnalyzer runs, so lint
   matches what the VM receives. Local-exec `command` heredocs are bash and are
   skipped.
+
+## Podman and runner versions
+
+- `podman_version` and `runner_version` pick GitHub releases (`latest` by
+  default, or a version such as `6.2.0`).
+- `podman_msi_path` (for example `./podman-6.3.0.msi`, gitignored) installs a
+  local MSI instead. Terraform uploads it to a private storage account that
+  only the current public IP and the VM subnet (service endpoint) can reach.
+  `install-podman` downloads it with a 24-hour read-only SAS, passed as a
+  protected parameter, and checks its SHA-256.
 
 ## Requirements
 

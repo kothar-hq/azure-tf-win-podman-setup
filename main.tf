@@ -103,3 +103,33 @@ variable "enable_remote_management" {
   type        = bool
   default     = true
 }
+variable "podman_version" {
+  type        = string
+  description = "Podman release to install from GitHub, without the leading v (for example 6.2.0), or \"latest\". Ignored when podman_msi_path is set."
+  default     = "latest"
+
+  validation {
+    condition     = var.podman_version == "latest" || can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?$", var.podman_version))
+    error_message = "podman_version must be \"latest\" or a version such as 6.2.0."
+  }
+}
+variable "runner_version" {
+  type        = string
+  description = "GitHub Actions runner release to install, without the leading v (for example 2.329.0), or \"latest\"."
+  default     = "latest"
+
+  validation {
+    condition     = var.runner_version == "latest" || can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.runner_version))
+    error_message = "runner_version must be \"latest\" or a version such as 2.329.0."
+  }
+}
+variable "podman_msi_path" {
+  type        = string
+  description = "Path to a local Podman MSI (for example ./podman-6.3.0.msi). When set, Terraform uploads it to a private storage account and the VM installs it instead of a GitHub release."
+  default     = null
+
+  validation {
+    condition     = var.podman_msi_path == null || can(regex("\\.msi$", var.podman_msi_path))
+    error_message = "podman_msi_path must point to a .msi file."
+  }
+}

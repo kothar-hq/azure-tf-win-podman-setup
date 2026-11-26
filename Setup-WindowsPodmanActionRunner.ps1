@@ -2,9 +2,11 @@
 .SYNOPSIS
     Verifies the Podman machine and GitHub Actions runner installation.
 #>
-[CmdletBinding()]
+# This script runs through a run_as_user run command. That handler appends
+# literal "2>file 1>file" arguments, so it must stay a simple script: no
+# [CmdletBinding()] or [Parameter()] attributes, or binding fails with exit 1
+# and no output. The extra arguments land in $args.
 param(
-    [Parameter(Mandatory)]
     [string]$RunnerUser,
 
     [string]$PodmanMachineName = 'podman-machine-default'
@@ -12,6 +14,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if (-not $RunnerUser) {
+    throw 'RunnerUser is required.'
+}
 
 # Run commands that use run_as_user may inherit SYSTEM's environment block.
 $userProfile = Join-Path $env:SystemDrive "Users\$RunnerUser"
@@ -39,7 +45,7 @@ if (-not (Test-Path -Path $podman)) {
 }
 
 Write-Host 'Podman version:'
-& $podman version
+& $podman --version
 
 if ($LASTEXITCODE -ne 0) {
     throw 'Podman client verification failed.'
@@ -49,19 +55,8 @@ Write-Host 'Podman machine:'
 & $podman machine list
 
 if ($LASTEXITCODE -ne 0) {
-    throw 'Podman machine verification failed.'
+    throw 'Podman machine list failed.'
 }
-
-Write-Host 'Podman connection:'
-$podmanInfo = & $podman info
-
-if ($LASTEXITCODE -ne 0) {
-    throw 'Podman connectivity verification failed.'
-}
-
-$podmanInfo |
-    Select-Object -First 15 |
-    ForEach-Object { Write-Host $_ }
 
 $runnerService = Get-Service -Name 'actions.runner*' -ErrorAction SilentlyContinue |
     Sort-Object Name |

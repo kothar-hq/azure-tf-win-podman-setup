@@ -1,30 +1,55 @@
 # -------------------------------
 # Post-install: run commands that configure Hyper-V, Podman, and the runner
 # -------------------------------
+locals {
+  use_local_podman_msi = var.podman_msi_path != null
+
+  podman_release_path = var.podman_version == "latest" ? "latest" : "tags/v${var.podman_version}"
+  runner_release_path = var.runner_version == "latest" ? "latest" : "tags/v${var.runner_version}"
+}
+
+# Skipped when a local MSI is installed instead of a GitHub release.
 data "http" "podman_release" {
-  url = "https://api.github.com/repos/containers/podman/releases/latest"
+  count = local.use_local_podman_msi ? 0 : 1
+  url   = "https://api.github.com/repos/containers/podman/releases/${local.podman_release_path}"
 
   request_headers = {
     Accept     = "application/vnd.github+json"
     User-Agent = "terraform-azure-podman-runner"
+  }
+
+  lifecycle {
+    postcondition {
+      condition     = self.status_code == 200
+      error_message = "Podman release ${var.podman_version} was not found on GitHub."
+    }
   }
 }
 
 data "http" "runner_release" {
-  url = "https://api.github.com/repos/actions/runner/releases/latest"
+  url = "https://api.github.com/repos/actions/runner/releases/${local.runner_release_path}"
 
   request_headers = {
     Accept     = "application/vnd.github+json"
     User-Agent = "terraform-azure-podman-runner"
   }
+
+  lifecycle {
+    postcondition {
+      condition     = self.status_code == 200
+      error_message = "GitHub Actions runner release ${var.runner_version} was not found on GitHub."
+    }
+  }
 }
 
 locals {
-  podman_release = jsondecode(data.http.podman_release.response_body)
-  podman_msi_url = [
-    for asset in local.podman_release.assets : asset.browser_download_url
+  podman_release_msi_url = local.use_local_podman_msi ? null : [
+    for asset in jsondecode(data.http.podman_release[0].response_body).assets : asset.browser_download_url
     if can(regex("windows[-_]amd64\\.msi$", asset.name))
   ][0]
+
+  # Read-only SAS URL for the uploaded MSI (see podman-msi.tf).
+  podman_msi_url = local.use_local_podman_msi ? "${azurerm_storage_blob.podman_msi[0].url}${data.azurerm_storage_account_blob_container_sas.podman_msi[0].sas}" : local.podman_release_msi_url
 
   runner_release = jsondecode(data.http.runner_release.response_body)
   runner_zip_url = [
@@ -32,80 +57,17 @@ locals {
     if can(regex("^actions-runner-win-x64-.*\\.zip$", asset.name))
   ][0]
 
-  create_user_profile = <<-EOT
-      # Create a Windows user profile using the native CreateProfile API via P/Invoke.
-      function New-LocalUserProfile {
-          [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
-          param(
-              [Parameter(Mandatory, ValueFromPipeline, ValueFromPipelineByPropertyName)]
-              [Alias('Name')]
-              [ValidateNotNullOrEmpty()]
-              [string]$UserName
-          )
-
-          begin {
-              if (-not ('UserProfileNative' -as [type])) {
-                  Add-Type @'
-      using System;
-      using System.Runtime.InteropServices;
-      using System.Text;
-
-      public static class UserProfileNative {
-          [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
-          public static extern int CreateProfile(
-              string sid,
-              string username,
-              StringBuilder profilePath,
-              uint profilePathLength
-          );
-      }
-      '@
-              }
-          }
-
-          process {
-              $user = Get-LocalUser -Name $UserName -ErrorAction Stop
-              $sid = $user.SID.Value
-
-              if ($PSCmdlet.ShouldProcess($UserName, 'Create Windows user profile')) {
-                  $path = [System.Text.StringBuilder]::new(260)
-
-                  $result = [UserProfileNative]::CreateProfile(
-                      $sid,
-                      $UserName,
-                      $path,
-                      [uint32]$path.Capacity
-                  )
-
-                  if ($result -ne 0) {
-                      $exception = [System.ComponentModel.Win32Exception]::new($result)
-                      $errorRecord = [System.Management.Automation.ErrorRecord]::new(
-                          $exception,
-                          'CreateUserProfileFailed',
-                          [System.Management.Automation.ErrorCategory]::InvalidOperation,
-                          $UserName
-                      )
-
-                      $PSCmdlet.WriteError($errorRecord)
-                      return
-                  }
-
-                  [PSCustomObject]@{
-                      UserName    = $UserName
-                      SID         = $sid
-                      ProfilePath = $path.ToString()
-                      Created     = $true
-                  }
-              }
-          }
-      }
-    EOT
 
   add_user_to_hyperv_admins = <<-EOT
       # The Hyper-V Administrators group has a well-known SID.
+      # Compare SIDs: Get-LocalGroupMember reports names as COMPUTER\user, so a
+      # name comparison misses bare user names and re-adding throws.
       $hyperVGroupSid = 'S-1-5-32-578'
+      $accountSid = ([Security.Principal.NTAccount]$accountName).Translate(
+          [Security.Principal.SecurityIdentifier]
+      ).Value
       $isHyperVAdmin = Get-LocalGroupMember -SID $hyperVGroupSid |
-          Where-Object { $_.Name -eq $accountName }
+          Where-Object { $_.SID.Value -eq $accountSid }
 
       if (-not $isHyperVAdmin) {
           Add-LocalGroupMember -SID $hyperVGroupSid -Member $accountName
@@ -231,6 +193,11 @@ resource "azurerm_virtual_machine_run_command" "install_hyperv" {
     azurerm_virtual_machine_run_command.enable_remote_management,
   ]
 
+  timeouts {
+    create = "30m"
+    update = "30m"
+  }
+
   source {
     script = <<-EOT
       $ErrorActionPreference = 'Stop'
@@ -244,16 +211,6 @@ resource "azurerm_virtual_machine_run_command" "install_hyperv" {
   }
 }
 
-resource "time_sleep" "wait_for_reboot" {
-  depends_on      = [azurerm_virtual_machine_run_command.install_hyperv]
-  create_duration = "6m"
-
-  triggers = {
-    vm_id = azurerm_windows_virtual_machine.vm.id
-  }
-}
-
-/*
 resource "terraform_data" "wait_for_reboot" {
   depends_on = [azurerm_virtual_machine_run_command.install_hyperv]
 
@@ -294,7 +251,6 @@ resource "terraform_data" "wait_for_reboot" {
     EOT
   }
 }
-// */
 
 # -------------------------------
 # VM Run Command - Install Podman
@@ -303,16 +259,27 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
   name               = "install-podman"
   location           = azurerm_resource_group.rg.location
   virtual_machine_id = azurerm_windows_virtual_machine.vm.id
-  //depends_on         = [terraform_data.wait_for_reboot]
-  depends_on = [time_sleep.wait_for_reboot]
+  depends_on         = [terraform_data.wait_for_reboot]
 
   timeouts {
     create = "30m"
   }
 
-  parameter {
+  # Protected: for a local MSI the URL carries a SAS token.
+  protected_parameter {
     name  = "PodmanMsiUrl"
     value = local.podman_msi_url
+  }
+
+  # Local MSI only: the script checks the download against it, and a new
+  # file re-runs this command.
+  dynamic "parameter" {
+    for_each = local.use_local_podman_msi ? [filesha256(var.podman_msi_path)] : []
+
+    content {
+      name  = "PodmanMsiSha256"
+      value = parameter.value
+    }
   }
 
   parameter {
@@ -325,16 +292,25 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
       param(
           [Parameter(Mandatory)]
           [string]$PodmanMsiUrl,
+          [string]$PodmanMsiSha256,
           [Parameter(Mandatory)]
           [string]$AccountName
       )
 
       $ErrorActionPreference = 'Stop'
 
-      $installer = Join-Path $env:TEMP (Split-Path -Path $PodmanMsiUrl -Leaf)
+      # A fixed name: a SAS URL has a query string after the file name.
+      $installer = Join-Path $env:TEMP 'podman-setup.msi'
       $log = Join-Path $env:TEMP 'podman-msi.log'
 
       Invoke-WebRequest -Uri $PodmanMsiUrl -OutFile $installer -UseBasicParsing
+
+      if ($PodmanMsiSha256) {
+          $actual = (Get-FileHash -Path $installer -Algorithm SHA256).Hash
+          if ($actual -ne $PodmanMsiSha256) {
+              throw "Podman MSI SHA-256 $actual does not match the expected $PodmanMsiSha256."
+          }
+      }
 
       $process = Start-Process `
           -FilePath 'msiexec.exe' `
@@ -369,8 +345,19 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
               'Machine'
           )
       }
+
+      # Workaround for podman-container-tools/podman#30266: add the admin to
+      # Hyper-V Administrators here, as SYSTEM. The run_as_user logon in
+      # prepare-podman-hyperv then carries the group in its token, so
+      # `podman system hyperv-prep` skips the user.Current() call that fails
+      # when the user's profile is not loaded.
       $accountName = $AccountName
       ${local.add_user_to_hyperv_admins}
+
+      # prepare-podman-hyperv is the first run_as_user command, and run-as
+      # needs Secondary Logon.
+      Set-Service -Name seclogon -StartupType Automatic
+      Start-Service -Name seclogon
     EOT
   }
 }
@@ -386,6 +373,11 @@ resource "azurerm_virtual_machine_run_command" "prepare_podman_hyperv" {
   run_as_user        = azurerm_windows_virtual_machine.vm.admin_username
   run_as_password    = azurerm_windows_virtual_machine.vm.admin_password
 
+  timeouts {
+    create = "15m"
+    update = "15m"
+  }
+
   source {
     script = <<-EOT
       $ErrorActionPreference = 'Stop'
@@ -397,11 +389,23 @@ resource "azurerm_virtual_machine_run_command" "prepare_podman_hyperv" {
       }
 
       # Pre-create the HKLM VSock entries so the runner account can create
-      # and manage Hyper-V machines without an elevated token.
-      & $podman system hyperv-prep || { "ignore failure"; $global:LASTEXITCODE = 0 }
+      # and manage Hyper-V machines without an elevated token. install-podman
+      # already added this account to Hyper-V Administrators (see #30266).
+      # Run-as output is not always returned to Azure, so keep a log too.
+      $log = Join-Path $env:ProgramData 'podman-hyperv-prep.log'
+      $ErrorActionPreference = 'Continue'
+      # --mounts 3: podman 6.3 `machine init` defaults to three volumes (home,
+      # C:\, and %APPDATA%\containers), but hyperv-prep only creates two
+      # Fileserver entries by default. With too few, a non-admin init fails with
+      # "the first time Podman initializes a Hyper-V machine, it requires admin
+      # rights".
+      & $podman system hyperv-prep --mounts 3 2>&1 | Tee-Object -FilePath $log
+      $prepExit = $LASTEXITCODE
+      & $podman system hyperv-prep --status 2>&1 | Tee-Object -FilePath $log -Append
+      $ErrorActionPreference = 'Stop'
 
-      if ($LASTEXITCODE -ne 0) {
-          throw 'Podman Hyper-V preparation failed.'
+      if ($prepExit -ne 0) {
+          throw "podman system hyperv-prep failed with exit code $prepExit. See $log"
       }
     EOT
   }
@@ -417,6 +421,11 @@ resource "azurerm_virtual_machine_run_command" "create_runner_user" {
   depends_on         = [azurerm_virtual_machine_run_command.prepare_podman_hyperv]
   # run_as_user        = azurerm_windows_virtual_machine.vm.admin_username
   # run_as_password    = azurerm_windows_virtual_machine.vm.admin_password
+
+  timeouts {
+    create = "60m"
+    update = "60m"
+  }
 
   parameter {
     name  = "RunnerUser"
@@ -445,8 +454,6 @@ resource "azurerm_virtual_machine_run_command" "create_runner_user" {
           [Parameter(Mandatory)]
           [string]$InstallRoot
       )
-
-      ${local.create_user_profile}
 
       $ErrorActionPreference = 'Stop'
 
@@ -495,161 +502,81 @@ resource "azurerm_virtual_machine_run_command" "create_runner_user" {
       $acl.SetAccessRule($rule)
       Set-Acl -Path $InstallRoot -AclObject $acl
 
-
-      $profileDirectory = (New-LocalUserProfile -Name $RunnerUser).ProfilePath
-
-      # New-LocalUserProfile creates the profile directory, but the
-      # administrators group owns it. The subfolders are created correctly.
-      if (-not (Test-Path -Path $profileDirectory)) {
-          throw "Windows did not create the profile directory $profileDirectory."
+      # Add the runner account to 'OpenSSH Users' so Windows sshd allows login.
+      $sshGroupName = 'OpenSSH Users'
+      if (-not (Get-LocalGroup -Name $sshGroupName -ErrorAction SilentlyContinue)) {
+          New-LocalGroup -Name $sshGroupName | Out-Null
       }
 
-      Set-Acl -Path $profileDirectory -AclObject $acl
+      $userSid = ([Security.Principal.NTAccount]$accountName).Translate(
+          [Security.Principal.SecurityIdentifier]
+      ).Value
+
+      $isGroupMember = Get-LocalGroupMember -Group $sshGroupName -ErrorAction SilentlyContinue |
+          Where-Object { $_.SID.Value -eq $userSid }
+
+      if (-not $isGroupMember) {
+          Add-LocalGroupMember -Group $sshGroupName -Member $RunnerUser
+      }
     EOT
   }
 }
 
-# -------------------------------
-# VM Run Command - Initialize Podman Machine
-# -------------------------------
-resource "azurerm_virtual_machine_run_command" "configure_podman_machine" {
-  name               = "configure-podman-machine"
-  location           = azurerm_resource_group.rg.location
-  virtual_machine_id = azurerm_windows_virtual_machine.vm.id
-  run_as_user        = var.runner_user
-  run_as_password    = random_password.runner_password.result
-  depends_on         = [azurerm_virtual_machine_run_command.create_runner_user]
+# -----------------------------------------------------------------------
+# Configure Podman Machine via SSH
+# (run_as_user hits Resize-VHD "Incorrect function" with no console;
+#  SSH provides a user session that has console access.)
+# -----------------------------------------------------------------------
+resource "terraform_data" "configure_podman_machine" {
+  depends_on = [azurerm_virtual_machine_run_command.create_runner_user]
 
-  timeouts {
-    create = "60m"
-  }
+  triggers_replace = [
+    var.runner_user,
+    var.podman_machine_name,
+    var.podman_cpus,
+    var.podman_memory_mb,
+    var.podman_disk_gb,
+    azurerm_virtual_machine_run_command.create_runner_user.id,
+  ]
 
-  parameter {
-    name  = "MachineName"
-    value = var.podman_machine_name
-  }
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      TARGET_IP    = azurerm_public_ip.pip.ip_address
+      RUNNER_USER  = var.runner_user
+      SSH_PASSWORD = random_password.runner_password.result
+      MACHINE_NAME = var.podman_machine_name
+      CPUS         = tostring(var.podman_cpus)
+      MEMORY_MB    = tostring(var.podman_memory_mb)
+      DISK_GB      = tostring(var.podman_disk_gb)
+    }
+    command = <<-EOT
+      set -euo pipefail
 
-  parameter {
-    name  = "RunnerUser"
-    value = var.runner_user
-  }
+      ASKPASS=$(mktemp)
+      chmod 700 "$ASKPASS"
+      printf '#!/bin/sh\nprintf "%%s\\n" "$SSH_PASSWORD"\n' > "$ASKPASS"
+      trap 'rm -f "$ASKPASS"' EXIT
 
-  parameter {
-    name  = "Cpus"
-    value = tostring(var.podman_cpus)
-  }
+      export SSH_ASKPASS="$ASKPASS"
+      export SSH_ASKPASS_REQUIRE=force
 
-  parameter {
-    name  = "MemoryMB"
-    value = tostring(var.podman_memory_mb)
-  }
+      SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10"
 
-  parameter {
-    name  = "DiskGB"
-    value = tostring(var.podman_disk_gb)
-  }
-
-  source {
-    script = <<-EOT
-      param(
-          [Parameter(Mandatory)]
-          [string]$MachineName,
-
-          [Parameter(Mandatory)]
-          [string]$RunnerUser,
-
-          [Parameter(Mandatory)]
-          [int]$Cpus,
-
-          [Parameter(Mandatory)]
-          [int]$MemoryMB,
-
-          [Parameter(Mandatory)]
-          [int]$DiskGB
-      )
-
-      $ErrorActionPreference = 'Stop'
-
-      $podmanDirectory = Join-Path $env:ProgramFiles 'Podman'
-      $podman = Join-Path $podmanDirectory 'podman.exe'
-
-      if (-not (Test-Path -Path $podman)) {
-          throw 'Podman executable not found.'
-      }
-
-      # Keep Podman machine state in the runner account's profile. Run commands
-      # that use run_as_user may inherit SYSTEM's environment block, so set the
-      # profile paths explicitly.
-      $userProfile = Join-Path $env:SystemDrive "Users\$RunnerUser"
-      $appData = Join-Path $userProfile 'AppData\Roaming'
-      $localAppData = Join-Path $userProfile 'AppData\Local'
-      $tempPath = Join-Path $localAppData 'Temp'
-
-      New-Item -ItemType Directory -Force -Path $appData, $localAppData, $tempPath |
-          Out-Null
-
-      $env:USERPROFILE = $userProfile
-      $env:APPDATA = $appData
-      $env:LOCALAPPDATA = $localAppData
-      $env:TEMP = $tempPath
-      $env:TMP = $tempPath
-      $env:HOME = $userProfile
-      $env:HOMEDRIVE = Split-Path -Qualifier $userProfile
-      $env:HOMEPATH = $userProfile.Substring(2)
-      $env:PATH = "$podmanDirectory;$env:PATH"
-      $env:CONTAINERS_MACHINE_PROVIDER = 'hyperv'
-
-      $machineJson = & $podman machine list --format json
-
-      if ($LASTEXITCODE -ne 0) {
-          throw 'Unable to list Podman machines.'
-      }
-
-      $machines = @()
-      if (-not [string]::IsNullOrWhiteSpace($machineJson)) {
-          $machines = @($machineJson | ConvertFrom-Json)
-      }
-
-      $machine = $machines |
-          Where-Object { $_.Name -eq $MachineName } |
-          Select-Object -First 1
-
-      if (-not $machine) {
-          & $podman machine init `
-              --provider hyperv `
-              --cpus $Cpus `
-              --memory $MemoryMB `
-              --disk-size $DiskGB `
-              $MachineName
-
-          if ($LASTEXITCODE -ne 0) {
-              throw 'Podman machine initialization failed.'
-          }
-      }
-
-      if (-not $machine -or -not $machine.Running) {
-          & $podman machine start $MachineName
-
-          if ($LASTEXITCODE -ne 0) {
-              throw 'Podman machine start failed.'
-          }
-      }
-
-      $deadline = (Get-Date).AddMinutes(10)
-
-      do {
-          & $podman info | Out-Null
-
-          if ($LASTEXITCODE -eq 0) {
+      echo "Waiting for SSH on $TARGET_IP:22 as $RUNNER_USER..."
+      for attempt in $(seq 1 30); do
+          if ssh $SSH_OPTS "$RUNNER_USER@$TARGET_IP" "exit 0" </dev/null 2>/dev/null; then
+              echo "SSH ready after $attempt attempt(s)."
               break
-          }
+          fi
+          [ "$attempt" -eq 30 ] && { echo "Timed out waiting for SSH." >&2; exit 1; }
+          echo "Attempt $attempt/30: not ready; retrying in 20s."
+          sleep 20
+      done
 
-          Start-Sleep -Seconds 10
-      } while ((Get-Date) -lt $deadline)
-
-      if ($LASTEXITCODE -ne 0) {
-          throw 'Podman connectivity verification failed.'
-      }
+      REMOTE="powershell -NonInteractive -File - -MachineName $MACHINE_NAME -Cpus $CPUS -MemoryMB $MEMORY_MB -DiskGB $DISK_GB"
+      timeout 3600 ssh $SSH_OPTS "$RUNNER_USER@$TARGET_IP" "$REMOTE" \
+          < "${path.module}/Configure-PodmanMachine.ps1"
     EOT
   }
 }
@@ -661,7 +588,12 @@ resource "azurerm_virtual_machine_run_command" "create_podman_startup_task" {
   name               = "create-podman-startup-task"
   location           = azurerm_resource_group.rg.location
   virtual_machine_id = azurerm_windows_virtual_machine.vm.id
-  depends_on         = [azurerm_virtual_machine_run_command.configure_podman_machine]
+  depends_on         = [terraform_data.configure_podman_machine]
+
+  timeouts {
+    create = "15m"
+    update = "15m"
+  }
 
   parameter {
     name  = "RunnerUser"
@@ -725,6 +657,25 @@ resource "azurerm_virtual_machine_run_command" "create_podman_startup_task" {
           -Password $RunnerPassword `
           -Force |
           Out-Null
+
+      # Trigger the task immediately so the machine starts under the Task
+      # Scheduler service context. gvproxy launched by that task is NOT inside
+      # the SSH session's Job Object and therefore persists after SSH disconnects.
+      Start-ScheduledTask -TaskName 'Start-Podman-Machine'
+
+      $deadline = (Get-Date).AddMinutes(5)
+      do {
+          Start-Sleep -Seconds 5
+          $gv = Get-Process -Name 'gvproxy' -ErrorAction SilentlyContinue
+          if ($gv) {
+              Write-Host "gvproxy started (PID $($gv.Id))."
+              break
+          }
+      } while ((Get-Date) -lt $deadline)
+
+      if (-not $gv) {
+          throw 'gvproxy did not start within timeout.'
+      }
     EOT
   }
 }
@@ -799,8 +750,6 @@ resource "azurerm_virtual_machine_run_command" "verify" {
   name               = "verify-runner"
   location           = azurerm_resource_group.rg.location
   virtual_machine_id = azurerm_windows_virtual_machine.vm.id
-  run_as_user        = var.runner_user
-  run_as_password    = random_password.runner_password.result
   depends_on         = [azurerm_virtual_machine_run_command.install_runner]
 
   timeouts {

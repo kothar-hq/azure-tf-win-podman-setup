@@ -98,7 +98,7 @@ foreach ($file in $ps1Files) {
 # profile helper is a local interpolated into one. Local-exec `command`
 # heredocs are bash, so they are intentionally skipped.
 $heredocPattern = '(?ms)^[ \t]*(?<key>[A-Za-z0-9_]+)[ \t]*=[ \t]*<<(?<strip>-?)EOT[ \t]*\r?\n(?<body>.*?)^[ \t]*EOT[ \t]*$'
-$terraformScriptKeys = @('script', 'create_user_profile')
+$terraformScriptKeys = @('script')
 
 $tfFiles = Get-ChildItem -Path $Path -Filter *.tf -File
 

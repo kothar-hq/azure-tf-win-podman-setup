@@ -61,6 +61,8 @@ resource "azurerm_subnet" "subnet" {
   resource_group_name  = azurerm_resource_group.rg.name
   virtual_network_name = azurerm_virtual_network.vnet.name
   address_prefixes     = ["10.0.1.0/24"]
+  # Lets the VM reach the optional Podman MSI storage account (podman-msi.tf).
+  service_endpoints = ["Microsoft.Storage"]
 }
 
 # -------------------------------
@@ -107,7 +109,10 @@ resource "azurerm_public_ip" "pip" {
   name                = "tf-demo-pip"
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
-  allocation_method   = "Dynamic"
+  # Basic SKU public IPs are retired. Static allocation also means the address
+  # is known before the VM boots, which the post-reboot TCP probe relies on.
+  sku               = "Standard"
+  allocation_method = "Static"
 }
 
 resource "azurerm_network_interface" "nic" {
@@ -141,6 +146,9 @@ resource "azurerm_windows_virtual_machine" "vm" {
   network_interface_ids             = [azurerm_network_interface.nic.id]
   provision_vm_agent                = true
   vm_agent_platform_updates_enabled = true
+  priority                          = var.vm_spot ? "Spot" : "Regular"
+  eviction_policy                   = var.vm_spot ? "Deallocate" : null
+  max_bid_price                     = var.vm_spot ? -1 : null
 
   boot_diagnostics {}
 

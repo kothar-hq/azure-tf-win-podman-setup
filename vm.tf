@@ -141,6 +141,7 @@ resource "azurerm_windows_virtual_machine" "vm" {
   network_interface_ids             = [azurerm_network_interface.nic.id]
   provision_vm_agent                = true
   vm_agent_platform_updates_enabled = true
+  patch_mode                        = "Manual"
 
   boot_diagnostics {}
 

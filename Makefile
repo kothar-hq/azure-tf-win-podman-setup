@@ -3,7 +3,7 @@ SHELL := /bin/bash
 TF := ./terraform-with-secrets.sh
 PWSH := pwsh -NoProfile -File scripts/Test-PowerShell.ps1
 
-.PHONY: help init validate fmt-check tf-validate shellcheck ps-lint tflint tfsec git-diff-check plan apply destroy status run-commands password ip
+.PHONY: help init validate fmt-check tf-validate shellcheck ps-lint tflint tfsec git-diff-check plan apply destroy start stop status run-commands password ip
 
 help:
 	@printf '%s\n' \
@@ -11,6 +11,8 @@ help:
 		'make plan          Run terraform plan through the secret-loading wrapper' \
 		'make apply         Apply after explicit confirmation: make apply CONFIRM=apply' \
 		'make destroy       Destroy after explicit confirmation: make destroy CONFIRM=destroy' \
+		'make start         Start (un-deallocate) the VM; Terraform state is preserved' \
+		'make stop          Deallocate the VM to stop compute billing; disk and state are retained' \
 		'make status        Show Azure VM power/provisioning state' \
 		'make run-commands  Show each Azure VM run command status and output' \
 		'make password      Print the sensitive VM admin password' \
@@ -53,6 +55,16 @@ apply:
 destroy:
 	@test "$(CONFIRM)" = "destroy" || { echo 'Refusing to destroy. Re-run with: make destroy CONFIRM=destroy'; exit 1; }
 	$(TF) destroy
+
+start:
+	@rg=$$($(TF) output -raw resource_group_name) && \
+	vm=$$($(TF) output -raw vm_name) && \
+	az vm start --resource-group "$$rg" --name "$$vm"
+
+stop:
+	@rg=$$($(TF) output -raw resource_group_name) && \
+	vm=$$($(TF) output -raw vm_name) && \
+	az vm deallocate --resource-group "$$rg" --name "$$vm"
 
 status:
 	@rg=$$($(TF) output -raw resource_group_name) && \

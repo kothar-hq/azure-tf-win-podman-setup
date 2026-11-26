@@ -58,6 +58,22 @@ Apply only after the user confirms:
 make apply CONFIRM=apply
 ```
 
+## Cost-saving deallocation workflow
+
+`patch_mode = "Manual"` on the VM prevents Windows Update from running
+automatically, keeping the OS state stable between sessions.
+
+```bash
+make stop   # az vm deallocate — stops compute billing; disk, Podman machine,
+            # and runner registration are all retained; Public IP stays the same
+make start  # az vm start — VM resumes from where it stopped
+make apply  # re-apply after start if scripts changed; only changed run commands re-run
+```
+
+For Podman-only iterations (new MSI only), change `podman_msi_path` and apply:
+only `install_podman` re-runs (~10 min) because `configure_podman_machine`
+triggers only when its own variables or the `create_runner_user` ID changes.
+
 ## OpenCode assets
 
 - Skills: `azure-tf-vm` (infrastructure) and `powershell-run-commands`

@@ -101,7 +101,7 @@ locals {
       }
     EOT
 
-    add_user_to_hyperv_admins = <<-EOT
+  add_user_to_hyperv_admins = <<-EOT
       # The Hyper-V Administrators group has a well-known SID.
       $hyperVGroupSid = 'S-1-5-32-578'
       $isHyperVAdmin = Get-LocalGroupMember -SID $hyperVGroupSid |
@@ -304,8 +304,8 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
   location           = azurerm_resource_group.rg.location
   virtual_machine_id = azurerm_windows_virtual_machine.vm.id
   //depends_on         = [terraform_data.wait_for_reboot]
-  depends_on         = [time_sleep.wait_for_reboot]
-  
+  depends_on = [time_sleep.wait_for_reboot]
+
   timeouts {
     create = "30m"
   }
@@ -369,6 +369,8 @@ resource "azurerm_virtual_machine_run_command" "install_podman" {
               'Machine'
           )
       }
+
+      $accountName = $AccountName
       ${local.add_user_to_hyperv_admins}
     EOT
   }

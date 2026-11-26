@@ -2,22 +2,22 @@
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
     "allow": [
+      "Bash(./terraform-with-secrets.sh apply:*)",
+      "Bash(./terraform-with-secrets.sh destroy:*)",
       "Bash(make validate:*)",
       "Bash(make plan:*)",
       "Bash(make status:*)",
       "Bash(make run-commands:*)",
       "Bash(make ip:*)",
-      "Bash(gh issue comment:*)"
-    ],
-    "ask": [
+      "Bash(gh issue comment:*)",
       "Bash(terraform apply:*)",
       "Bash(terraform destroy:*)",
-      "Bash(./terraform-with-secrets.sh apply:*)",
-      "Bash(./terraform-with-secrets.sh destroy:*)",
       "Bash(make apply:*)",
       "Bash(make destroy:*)",
       "Bash(make password:*)",
       "Bash(az vm run-command invoke:*)"
+    ],
+    "ask": [
     ]
   }
 }

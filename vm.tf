@@ -146,6 +146,9 @@ resource "azurerm_windows_virtual_machine" "vm" {
   network_interface_ids             = [azurerm_network_interface.nic.id]
   provision_vm_agent                = true
   vm_agent_platform_updates_enabled = true
+  priority                          = var.vm_spot ? "Spot" : "Regular"
+  eviction_policy                   = var.vm_spot ? "Deallocate" : null
+  max_bid_price                     = var.vm_spot ? -1 : null
 
   boot_diagnostics {}
 

@@ -45,7 +45,7 @@ if (-not (Test-Path -Path $podman)) {
 }
 
 Write-Host 'Podman version:'
-& $podman version
+& $podman --version
 
 if ($LASTEXITCODE -ne 0) {
     throw 'Podman client verification failed.'
@@ -55,19 +55,8 @@ Write-Host 'Podman machine:'
 & $podman machine list
 
 if ($LASTEXITCODE -ne 0) {
-    throw 'Podman machine verification failed.'
+    throw 'Podman machine list failed.'
 }
-
-Write-Host 'Podman connection:'
-$podmanInfo = & $podman info
-
-if ($LASTEXITCODE -ne 0) {
-    throw 'Podman connectivity verification failed.'
-}
-
-$podmanInfo |
-    Select-Object -First 15 |
-    ForEach-Object { Write-Host $_ }
 
 $runnerService = Get-Service -Name 'actions.runner*' -ErrorAction SilentlyContinue |
     Sort-Object Name |

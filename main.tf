@@ -133,3 +133,8 @@ variable "podman_msi_path" {
     error_message = "podman_msi_path must point to a .msi file."
   }
 }
+variable "vm_spot" {
+  type        = bool
+  description = "Use Azure Spot pricing (pre-emptible VM). Spot VMs cost 70-90% less but can be evicted by Azure; eviction policy is Deallocate so state is preserved. Set false for a regular on-demand VM."
+  default     = true
+}
